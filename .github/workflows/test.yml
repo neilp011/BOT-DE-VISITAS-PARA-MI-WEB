@@ -23,3 +23,4 @@ jobs:
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
           ALLOWED_DOMAINS: ${{ secrets.ALLOWED_DOMAINS }}
+          EXTRA_WAIT_MS: "30000"
