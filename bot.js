@@ -1,45 +1,182 @@
 const { chromium } = require('playwright');
 
-const BASE_URL = process.env.BASE_URL || 'https://gringo200081.blogspot.com/?m=1';
+// ==================== CONFIGURACIÓN ====================
+// Definí estos valores como variables de entorno/secrets (en GitHub Actions, por ejemplo),
+// nunca los hardcodees acá para no exponer tu sitio en el código.
+const BASE_URL = process.env.BASE_URL;
+if (!BASE_URL) {
+  console.error('Falta la variable de entorno BASE_URL (la URL de inicio a rastrear).');
+  process.exit(1);
+}
+
+// Cuántos "saltos" de links sigue el bot desde la home (0 = solo la home)
+const MAX_DEPTH = parseInt(process.env.MAX_DEPTH || '2', 10);
+
+// Dominios que el bot puede recorrer/clickear libremente (son "tuyos").
+// Si un link va a otro dominio, solo se chequea que responda (no se navega ni clickea).
+// Por defecto usa el dominio de BASE_URL. Podés agregar más separados por coma en la env var:
+// ALLOWED_DOMAINS="dominio1.com,dominio2.com"
+const ALLOWED_DOMAINS = (process.env.ALLOWED_DOMAINS || new URL(BASE_URL).hostname)
+  .split(',')
+  .map(d => d.trim().toLowerCase())
+  .filter(Boolean);
+
+// Textos que el bot busca para hacer clic (case-insensitive, admite variantes)
+const CLICK_TEXT_PATTERNS = [
+  /haz\s*click\s*aqu[ií]/i,
+  /haz\s*clic\s*aqu[ií]/i,
+  /click\s*aqu[ií]/i,
+];
+
+function isAllowedDomain(url) {
+  try {
+    const hostname = new URL(url).hostname.toLowerCase();
+    return ALLOWED_DOMAINS.some(d => hostname === d || hostname.endsWith('.' + d));
+  } catch {
+    return false;
+  }
+}
+
+function cleanUrl(url) {
+  return url.split('#')[0];
+}
 
 async function run() {
   const browser = await chromium.launch();
   const context = await browser.newContext();
-  const page = await context.newPage();
+
+  const visited = new Set();
   const results = [];
+  const queue = [{ url: BASE_URL, depth: 0 }];
 
-  console.log(`Abriendo ${BASE_URL}`);
-  await page.goto(BASE_URL, { waitUntil: 'networkidle' });
-  console.log('Título de la página:', await page.title());
+  console.log(`Dominios permitidos para navegar/clickear: ${ALLOWED_DOMAINS.join(', ')}`);
+  console.log(`Profundidad máxima: ${MAX_DEPTH}\n`);
 
-  const links = await page.$$eval('a[href]', as => as.map(a => a.href));
-  const uniqueLinks = [...new Set(links)].filter(l => l.startsWith('http'));
+  while (queue.length > 0) {
+    const { url, depth } = queue.shift();
+    const target = cleanUrl(url);
+    if (visited.has(target)) continue;
+    visited.add(target);
 
-  console.log(`Encontrados ${uniqueLinks.length} links para probar`);
+    const page = await context.newPage();
+    const consoleErrors = [];
+    page.on('console', msg => {
+      if (msg.type() === 'error') consoleErrors.push(msg.text());
+    });
+    page.on('pageerror', err => consoleErrors.push(err.message));
 
-  for (const link of uniqueLinks) {
+    const record = {
+      url: target, depth, status: null, ok: false, title: null,
+      consoleErrors: [], brokenImages: [], clicked: [],
+    };
+
     try {
-      const response = await page.request.get(link, { timeout: 10000 });
-      const status = response.status();
-      const ok = status >= 200 && status < 400;
-      console.log(`${ok ? 'OK' : 'ERROR'} (${status}) - ${link}`);
-      results.push({ link, status, ok });
+      const response = await page.goto(target, { waitUntil: 'networkidle', timeout: 15000 });
+      record.status = response ? response.status() : null;
+      record.ok = record.status >= 200 && record.status < 400;
+      record.title = await page.title();
+
+      console.log(`${record.ok ? 'OK' : 'ERROR'} (${record.status}) [nivel ${depth}] - ${target} - "${record.title}"`);
+
+      record.brokenImages = await page.$$eval('img', imgs =>
+        imgs.filter(img => !img.complete || img.naturalWidth === 0).map(img => img.src)
+      );
+      if (record.brokenImages.length > 0) {
+        console.log(`  ⚠ ${record.brokenImages.length} imagen(es) rota(s)`);
+      }
+
+      const clickables = await page.$$('a, button');
+      for (const el of clickables) {
+        const text = (await el.innerText().catch(() => '')).trim();
+        if (!CLICK_TEXT_PATTERNS.some(rx => rx.test(text))) continue;
+
+        console.log(`  → Clic en elemento "${text}"`);
+        const before = page.url();
+
+        try {
+          await Promise.all([
+            page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {}),
+            el.click({ timeout: 5000 }),
+          ]);
+          const after = page.url();
+          record.clicked.push({ text, before, after, ok: true });
+
+          if (after !== before && isAllowedDomain(after) && !visited.has(cleanUrl(after))) {
+            queue.push({ url: after, depth: depth + 1 });
+          }
+
+          if (after !== before) {
+            await page.goto(target, { waitUntil: 'networkidle', timeout: 15000 }).catch(() => {});
+          }
+        } catch (err) {
+          console.log(`    ✗ Error al clickear: ${err.message}`);
+          record.clicked.push({ text, before, ok: false, error: err.message });
+        }
+      }
+
+      if (depth < MAX_DEPTH) {
+        const links = await page.$$eval('a[href]', as => as.map(a => a.href));
+        for (const link of [...new Set(links)]) {
+          if (visited.has(cleanUrl(link))) continue;
+
+          if (isAllowedDomain(link)) {
+            queue.push({ url: link, depth: depth + 1 });
+          } else {
+            try {
+              const resp = await page.request.get(link, { timeout: 10000 });
+              const st = resp.status();
+              console.log(`  [externo] ${st >= 200 && st < 400 ? 'OK' : 'ERROR'} (${st}) - ${link}`);
+            } catch (err) {
+              console.log(`  [externo] ERROR (sin respuesta) - ${link} - ${err.message}`);
+            }
+          }
+        }
+      }
     } catch (err) {
-      console.log(`ERROR (sin respuesta) - ${link} - ${err.message}`);
-      results.push({ link, status: null, ok: false });
+      console.log(`ERROR (sin respuesta) [nivel ${depth}] - ${target} - ${err.message}`);
     }
+
+    record.consoleErrors = consoleErrors;
+    if (consoleErrors.length > 0) {
+      console.log(`  ⚠ ${consoleErrors.length} error(es) de consola`);
+    }
+
+    results.push(record);
+    await page.close();
   }
 
   console.log('\n=== RESUMEN ===');
   const rotos = results.filter(r => !r.ok);
-  console.log(`Total: ${results.length} | OK: ${results.length - rotos.length} | Rotos: ${rotos.length}`);
+  const conProblemas = results.filter(r => r.consoleErrors.length > 0 || r.brokenImages.length > 0);
+  const totalClicks = results.reduce((sum, r) => sum + r.clicked.length, 0);
+  const clicksFallidos = results.reduce((sum, r) => sum + r.clicked.filter(c => !c.ok).length, 0);
+
+  console.log(`Páginas visitadas: ${results.length}`);
+  console.log(`OK: ${results.length - rotos.length} | Rotas: ${rotos.length}`);
+  console.log(`Elementos "haz click aquí" probados: ${totalClicks} | Fallidos: ${clicksFallidos}`);
+
   if (rotos.length > 0) {
-    console.log('\nLinks rotos:');
-    rotos.forEach(r => console.log(`- ${r.link} (${r.status ?? 'sin respuesta'})`));
+    console.log('\nPáginas con error:');
+    rotos.forEach(r => console.log(`- ${r.url} (${r.status ?? 'sin respuesta'})`));
+  }
+
+  if (conProblemas.length > 0) {
+    console.log('\nPáginas con problemas (consola / imágenes):');
+    conProblemas.forEach(r => {
+      if (r.consoleErrors.length) console.log(`- ${r.url}: ${r.consoleErrors.length} error(es) de consola`);
+      if (r.brokenImages.length) console.log(`- ${r.url}: ${r.brokenImages.length} imagen(es) rota(s)`);
+    });
+  }
+
+  if (clicksFallidos > 0) {
+    console.log('\nClics fallidos:');
+    results.forEach(r => {
+      r.clicked.filter(c => !c.ok).forEach(c => console.log(`- "${c.text}" en ${r.url}: ${c.error}`));
+    });
   }
 
   await browser.close();
-  if (rotos.length > 0) process.exit(1);
+  if (rotos.length > 0 || clicksFallidos > 0) process.exit(1);
 }
 
 run();
