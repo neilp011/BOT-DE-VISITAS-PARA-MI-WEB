@@ -1,1 +1,25 @@
+name: Test de la web
 
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 9 * * *'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm install
+
+      - run: npx playwright install --with-deps chromium
+
+      - run: node bot.js
+        env:
+          BASE_URL: https://tu-sitio.com
+          WAIT_MS: 15000
