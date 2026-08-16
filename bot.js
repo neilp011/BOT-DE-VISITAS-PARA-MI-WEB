@@ -1,27 +1,20 @@
 const { chromium } = require('playwright');
 
 // ==================== CONFIGURACIÓN ====================
-// Definí estos valores como variables de entorno/secrets (en GitHub Actions, por ejemplo),
-// nunca los hardcodees acá para no exponer tu sitio en el código.
 const BASE_URL = process.env.BASE_URL;
 if (!BASE_URL) {
   console.error('Falta la variable de entorno BASE_URL (la URL de inicio a rastrear).');
   process.exit(1);
 }
 
-// Cuántos "saltos" de links sigue el bot desde la home (0 = solo la home)
 const MAX_DEPTH = parseInt(process.env.MAX_DEPTH || '2', 10);
+const EXTRA_WAIT_MS = parseInt(process.env.EXTRA_WAIT_MS || '5000', 10);
 
-// Dominios que el bot puede recorrer/clickear libremente (son "tuyos").
-// Si un link va a otro dominio, solo se chequea que responda (no se navega ni clickea).
-// Por defecto usa el dominio de BASE_URL. Podés agregar más separados por coma en la env var:
-// ALLOWED_DOMAINS="dominio1.com,dominio2.com"
 const ALLOWED_DOMAINS = (process.env.ALLOWED_DOMAINS || new URL(BASE_URL).hostname)
   .split(',')
   .map(d => d.trim().toLowerCase())
   .filter(Boolean);
 
-// Textos que el bot busca para hacer clic (case-insensitive, admite variantes)
 const CLICK_TEXT_PATTERNS = [
   /haz\s*click\s*aqu[ií]/i,
   /haz\s*clic\s*aqu[ií]/i,
@@ -77,6 +70,10 @@ async function run() {
       record.title = await page.title();
 
       console.log(`${record.ok ? 'OK' : 'ERROR'} (${record.status}) [nivel ${depth}] - ${target} - "${record.title}"`);
+
+      if (EXTRA_WAIT_MS > 0) {
+        await page.waitForTimeout(EXTRA_WAIT_MS);
+      }
 
       record.brokenImages = await page.$$eval('img', imgs =>
         imgs.filter(img => !img.complete || img.naturalWidth === 0).map(img => img.src)
