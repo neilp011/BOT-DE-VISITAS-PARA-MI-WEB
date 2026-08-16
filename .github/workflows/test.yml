@@ -3,7 +3,7 @@ name: Test de la web
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '*/5 * * * *'
 
 jobs:
   test:
@@ -22,4 +22,3 @@ jobs:
       - run: node bot.js
         env:
           BASE_URL: https://gringo200081.blogspot.com/?m=1
-  
