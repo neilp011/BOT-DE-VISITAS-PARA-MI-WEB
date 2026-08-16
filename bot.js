@@ -1,4 +1,3 @@
-
 const { chromium } = require('playwright');
 
 const BASE_URL = process.env.BASE_URL || 'https://tu-sitio.com';
@@ -13,6 +12,8 @@ async function run() {
 
   console.log(`Abriendo ${BASE_URL}`);
   await page.goto(BASE_URL, { waitUntil: 'networkidle' });
+  await page.screenshot({ path: 'debug.png', fullPage: true });
+  console.log('Título de la página:', await page.title());
 
   const originalUrl = page.url();
   const baseOrigin = new URL(originalUrl).origin;
