@@ -23,3 +23,9 @@ jobs:
         env:
           BASE_URL: https://xpornhub30px.blogspot.com/2023/12/blog-post.html
           WAIT_MS: 15000
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug-screenshot
+          path: debug.png
